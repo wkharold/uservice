@@ -7,35 +7,80 @@ import (
 	"net/http"
 	"os"
 
+	"golang.org/x/net/context"
+
 	"github.com/mholt/caddy/middleware"
 	"github.com/mholt/caddy/middleware/headers"
-	reqlog "github.com/mholt/caddy/middleware/log"
+	mwlog "github.com/mholt/caddy/middleware/log"
 )
 
-type greeter struct{}
+type ContextHandler interface {
+	ServeHTTPWithContext(context.Context, http.ResponseWriter, *http.Request) (int, error)
+}
 
-func (greeter) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
+type ContextHandlerFunc func(context.Context, http.ResponseWriter, *http.Request) (int, error)
+
+func (h ContextHandlerFunc) ServeHTTPWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	return h(ctx, w, r)
+}
+
+type ContextAdapter struct {
+	ctx     context.Context
+	handler ContextHandler
+}
+
+func (cw ContextAdapter) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
+	return cw.handler.ServeHTTPWithContext(cw.ctx, w, r)
+}
+
+func greeter(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
 	fmt.Fprintf(w, "Hello World!")
 	return http.StatusOK, nil
 }
 
+type MiddlewareWrapper struct {
+	handler middleware.Handler
+}
+
+func (m MiddlewareWrapper) ServeHTTPWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	return m.handler.ServeHTTP(w, r)
+}
+
 func main() {
-	rule := reqlog.Rule{
-		PathScope: "/",
-		Format:    reqlog.DefaultLogFormat,
-		Log:       log.New(os.Stdout, "", 0),
+	g := &ContextAdapter{
+		ctx:     context.Background(),
+		handler: ContextHandlerFunc(greeter),
 	}
 
-	var g greeter
 	headers := headers.Headers{
 		Rules: []headers.Rule{
 			{Path: "/", Headers: []headers.Header{
-				{Name: "X-Middleware", Value: "Caddy"},
-				{Name: "X-Honestdollar-Seed", Value: "42"},
+				{Name: "X-Honestdollar-Chanllenge", Value: "42"},
 			}},
 		},
-		Next: middleware.Handler(g)}
-	logger := reqlog.Logger{Rules: []reqlog.Rule{rule}, Next: middleware.Handler(headers)}
+		Next: middleware.Handler(g),
+	}
+
+	h := &ContextAdapter{
+		ctx:     context.Background(),
+		handler: MiddlewareWrapper{handler: headers},
+	}
+
+	logger := mwlog.Logger{
+		Rules: []mwlog.Rule{
+			{
+				PathScope: "/",
+				Format:    mwlog.DefaultLogFormat,
+				Log:       log.New(os.Stdout, "", 0),
+			},
+		},
+		Next: middleware.Handler(h),
+	}
+
+	l := &ContextAdapter{
+		ctx:     context.Background(),
+		handler: MiddlewareWrapper{handler: logger},
+	}
 
 	http.Handle("/", func(hf middleware.Handler) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +88,6 @@ func main() {
 				http.Error(w, err.Error(), status)
 			}
 		}
-	}(logger))
+	}(l))
 	http.ListenAndServe(":8888", nil)
 }
